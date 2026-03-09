@@ -67,4 +67,9 @@ class MethodChannelVoiceCommand extends VoiceCommandPlatform {
     final result = await methodChannel.invokeMethod<bool>('isListening');
     return result ?? false;
   }
+
+  @override
+  Future<void> reapplyAudioSession() async {
+    await methodChannel.invokeMethod('reapplyAudioSession');
+  }
 }

@@ -49,6 +49,10 @@ abstract class VoiceCommandPlatform extends PlatformInterface {
     throw UnimplementedError('isListening() has not been implemented.');
   }
 
+  Future<void> reapplyAudioSession() {
+    throw UnimplementedError('reapplyAudioSession() has not been implemented.');
+  }
+
   Stream<VoiceCommandEvent> get eventStream {
     throw UnimplementedError('eventStream has not been implemented.');
   }

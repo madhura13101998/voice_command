@@ -18,19 +18,16 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     
-    // Configuration
     private var debounceDuration: TimeInterval = 1.5
     private var sessionFlushInterval: TimeInterval = 5.0
     
-    // State
     private var debounceTimer: Timer?
     private var sessionFlushTimer: Timer?
     private var speechBuffer: String = ""
     private var isCurrentlyListening: Bool = false
     private var isPaused: Bool = false
     private var isRestarting: Bool = false
-    
-    private var hasSentResult: Bool = false
+    private var isReapplying: Bool = false
     
     // MARK: - Registration
     
@@ -74,7 +71,6 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         vcpLog("handle method call: \(call.method)")
         switch call.method {
         case "requestPermissions":
-            vcpLog("Requesting permissions")
             requestPermissions(result: result)
             
         case "startListening":
@@ -82,35 +78,31 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             let debounce = args?["debounceDuration"] as? Double ?? debounceDuration
             let flush    = args?["sessionFlushInterval"] as? Double ?? sessionFlushInterval
             let locale   = args?["locale"] as? String
-            vcpLog("Start listening with debounceDuration=\(debounce), sessionFlushInterval=\(flush), locale=\(locale ?? "default")")
             startListening(debounceDuration: debounce,
                            sessionFlushInterval: flush,
                            locale: locale,
                            result: result)
             
         case "stopListening":
-            vcpLog("Stop listening requested")
             stopListening(result: result)
             
         case "pauseListening":
-            vcpLog("Pause listening requested")
             pauseListening(result: result)
             
         case "resumeListening":
-            vcpLog("Resume listening requested")
             resumeListening(result: result)
             
         case "clearBuffer":
-            vcpLog("Clear buffer requested")
             clearBuffer(result: result)
             
         case "isListening":
             let listeningState = isCurrentlyListening && !isPaused
-            vcpLog("isListening queried: \(listeningState)")
             result(listeningState)
             
+        case "reapplyAudioSession":
+            reapplyAudioSession(result: result)
+            
         default:
-            vcpLog("Unhandled method: \(call.method)")
             result(FlutterMethodNotImplemented)
         }
     }
@@ -118,10 +110,8 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     // MARK: - Permissions
     
     private func requestPermissions(result: @escaping FlutterResult) {
-        vcpLog("requestPermissions called")
         SFSpeechRecognizer.requestAuthorization { status in
             DispatchQueue.main.async {
-                vcpLog("Speech recognizer authorization status: \(status.rawValue)")
                 guard status == .authorized else {
                     vcpLog("Speech recognition permission denied")
                     result(false)
@@ -145,7 +135,6 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                                 result: @escaping FlutterResult) {
         vcpLog("startListening called")
         guard !isCurrentlyListening else {
-            vcpLog("startListening aborted: Already listening")
             result(FlutterError(code: "ALREADY_LISTENING",
                                 message: "Already listening", details: nil))
             return
@@ -159,29 +148,21 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         : SFSpeechRecognizer()
         
         guard let sr = speechRecognizer, sr.isAvailable else {
-            vcpLog("Speech recognizer is not available")
             result(FlutterError(code: "UNAVAILABLE",
                                 message: "Speech recognizer is not available",
                                 details: nil))
             return
         }
         
-        do {
-            try configureAudioSession()
-            try installAudioTap()
-            audioEngine.prepare()
-            try audioEngine.start()
-            startRecognitionTask()
-//            startSessionFlushTimer()
+        if startRecognitionPipeline() {
+            registerInterruptionObserver()
             isCurrentlyListening = true
             isPaused = false
-            vcpLog("Listening started")
             sendEvent(type: "listeningStarted")
             result(nil)
-        } catch {
-            vcpLog("Error starting listening: \(error.localizedDescription)")
+        } else {
             result(FlutterError(code: "AUDIO_ERROR",
-                                message: error.localizedDescription,
+                                message: "Failed to start audio pipeline",
                                 details: nil))
         }
     }
@@ -189,18 +170,14 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     // MARK: - Stop
     
     private func stopListening(result: @escaping FlutterResult) {
-        vcpLog("stopListening called")
         guard isCurrentlyListening else {
-            vcpLog("stopListening: Not currently listening, no action taken")
             result(nil)
             return
         }
-        firePendingDebounce()
         tearDown()
         isCurrentlyListening = false
         isPaused = false
         isRestarting = false
-        vcpLog("Listening stopped")
         sendEvent(type: "listeningStopped")
         result(nil)
     }
@@ -208,55 +185,40 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     // MARK: - Pause / Resume
     
     private func pauseListening(result: @escaping FlutterResult) {
-        vcpLog("pauseListening called")
         guard isCurrentlyListening, !isPaused else {
-            vcpLog("pauseListening: Either not listening or already paused")
             result(nil)
             return
         }
         isRestarting = true
-        firePendingDebounce()
-        vcpLog("Cancelling recognition task for pause")
         recognitionTask?.cancel()
         recognitionTask = nil
         recognitionRequest = nil
         audioEngine.inputNode.removeTap(onBus: 0)
         if audioEngine.isRunning {
-            vcpLog("Stopping audio engine for pause")
             audioEngine.stop()
         }
         sessionFlushTimer?.invalidate()
         sessionFlushTimer = nil
         isPaused = true
         isRestarting = false
-        vcpLog("Listening paused")
         sendEvent(type: "listeningPaused")
         result(nil)
     }
     
     private func resumeListening(result: @escaping FlutterResult) {
-        vcpLog("resumeListening called")
         guard isCurrentlyListening, isPaused else {
-            vcpLog("resumeListening: Not currently paused or not listening")
             result(nil)
             return
         }
-        do {
-            try configureAudioSession()
-            try installAudioTap()
-            audioEngine.prepare()
-            try audioEngine.start()
-            startRecognitionTask()
-//            startSessionFlushTimer()
+        if startRecognitionPipeline() {
+            registerInterruptionObserver()
             isPaused = false
             speechBuffer = ""
-            vcpLog("Listening resumed")
             sendEvent(type: "listeningResumed")
             result(nil)
-        } catch {
-            vcpLog("Error resuming listening: \(error.localizedDescription)")
+        } else {
             result(FlutterError(code: "AUDIO_ERROR",
-                                message: error.localizedDescription,
+                                message: "Failed to resume audio pipeline",
                                 details: nil))
         }
     }
@@ -264,48 +226,217 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     // MARK: - Clear Buffer
     
     private func clearBuffer(result: @escaping FlutterResult) {
-        vcpLog("clearBuffer called, clearing speechBuffer and debounceTimer")
         speechBuffer = ""
         debounceTimer?.invalidate()
         debounceTimer = nil
-        vcpLog("Buffer cleared and debounce timer invalidated")
         result(nil)
     }
     
-    // MARK: - Audio Engine
+    // MARK: - Reapply Audio Session
     
-    private func configureAudioSession() throws {
-        vcpLog("Configuring audio session")
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.record, mode: .measurement, options: .duckOthers)
-        try session.setActive(true, options: .notifyOthersOnDeactivation)
-        vcpLog("Audio session configured and activated")
+    private func reapplyAudioSession(result: @escaping FlutterResult) {
+        vcpLog("reapplyAudioSession called")
+        reapplyAudioSessionInternalWithRetry(attempt: 1, maxAttempts: 3) { success in
+            result(success ? nil : FlutterError(
+                code: "AUDIO_ERROR",
+                message: "Failed to reapply audio session after retries",
+                details: nil))
+        }
     }
     
-    private func installAudioTap() throws {
-        vcpLog("Installing audio tap on input node")
+    private func reapplyAudioSessionInternalWithRetry(
+        attempt: Int, maxAttempts: Int,
+        completion: ((Bool) -> Void)? = nil
+    ) {
+        vcpLog("reapplyAudioSession attempt \(attempt)/\(maxAttempts)")
+        guard !isReapplying else {
+            vcpLog("reapply skipped: already in progress")
+            completion?(true)
+            return
+        }
+        guard isCurrentlyListening, !isPaused else {
+            vcpLog("reapply skipped: not listening or paused")
+            completion?(true)
+            return
+        }
+        
+        isReapplying = true
+        
+        let success = rebuildPipeline()
+        
+        isReapplying = false
+        
+        if success {
+            vcpLog("reapplyAudioSession: pipeline restored on attempt \(attempt)")
+            completion?(true)
+        } else if attempt < maxAttempts {
+            let delay = Double(attempt) * 2.0
+            vcpLog("reapplyAudioSession: attempt \(attempt) failed, retrying in \(delay)s")
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.reapplyAudioSessionInternalWithRetry(
+                    attempt: attempt + 1,
+                    maxAttempts: maxAttempts,
+                    completion: completion)
+            }
+        } else {
+            vcpLog("reapplyAudioSession: all \(maxAttempts) attempts failed")
+            completion?(false)
+        }
+    }
+    
+    /// Tear down the current recognition pipeline and rebuild it from scratch.
+    /// Returns true on success.
+    private func rebuildPipeline() -> Bool {
+        isRestarting = true
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        recognitionRequest = nil
+        
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
+        audioEngine.inputNode.removeTap(onBus: 0)
+        audioEngine.reset()
+        
+        let ok = startRecognitionPipeline()
+        if ok {
+            speechBuffer = ""
+        }
+        return ok
+    }
+    
+    // MARK: - Audio Session Interruption Observer
+    
+    private func registerInterruptionObserver() {
+        removeInterruptionObserver()
+        NotificationCenter.default.addObserver(self,
+            selector: #selector(handleAudioSessionInterruption(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance())
+        NotificationCenter.default.addObserver(self,
+            selector: #selector(handleAudioRouteChange(_:)),
+            name: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance())
+        vcpLog("Interruption and route-change observers registered")
+    }
+    
+    private func removeInterruptionObserver() {
+        NotificationCenter.default.removeObserver(self,
+            name: AVAudioSession.interruptionNotification, object: nil)
+        NotificationCenter.default.removeObserver(self,
+            name: AVAudioSession.routeChangeNotification, object: nil)
+    }
+    
+    @objc private func handleAudioSessionInterruption(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
+            return
+        }
+        
+        if type == .ended {
+            vcpLog("Audio session interruption ended, will reapply in 1.5s")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.reapplyAudioSessionInternalWithRetry(attempt: 1, maxAttempts: 3)
+            }
+        } else {
+            vcpLog("Audio session interruption began")
+        }
+    }
+    
+    @objc private func handleAudioRouteChange(_ notification: Notification) {
+        guard !isReapplying else { return }
+        guard let userInfo = notification.userInfo,
+              let reasonValue = userInfo[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
+            return
+        }
+        
+        switch reason {
+        case .override, .newDeviceAvailable, .oldDeviceUnavailable:
+            vcpLog("Audio route changed (reason: \(reason.rawValue)), reapplying in 1.5s")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.reapplyAudioSessionInternalWithRetry(attempt: 1, maxAttempts: 3)
+            }
+        default:
+            vcpLog("Audio route changed (reason: \(reason.rawValue)), no action")
+        }
+    }
+    
+    // MARK: - Audio Pipeline
+    
+    /// Configures the audio session, installs the tap, starts the engine and
+    /// recognition task. Returns true on success.
+    private func startRecognitionPipeline() -> Bool {
+        do {
+            try configureAudioSession()
+        } catch {
+            vcpLog("configureAudioSession failed: \(error.localizedDescription)")
+            return false
+        }
+        
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        recognitionRequest = nil
+        
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        recognitionRequest = request
+        
         let inputNode = audioEngine.inputNode
         inputNode.removeTap(onBus: 0)
-        let format = inputNode.outputFormat(forBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+        
+        var recordingFormat = inputNode.outputFormat(forBus: 0)
+        if recordingFormat.sampleRate == 0 {
+            vcpLog("Warning: outputFormat is 0Hz, falling back to inputFormat")
+            recordingFormat = inputNode.inputFormat(forBus: 0)
+        }
+        
+        guard recordingFormat.sampleRate > 0 && recordingFormat.channelCount > 0 else {
+            vcpLog("⚠️ Invalid audio format: \(recordingFormat.sampleRate)Hz, \(recordingFormat.channelCount)ch")
+            recognitionRequest = nil
+            return false
+        }
+        
+        vcpLog("Installing tap: \(recordingFormat.sampleRate)Hz, \(recordingFormat.channelCount)ch")
+        
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) {
+            [weak self] buffer, _ in
             self?.recognitionRequest?.append(buffer)
         }
-        vcpLog("Audio tap installed")
+        
+        audioEngine.prepare()
+        do {
+            try audioEngine.start()
+        } catch {
+            vcpLog("audioEngine.start() failed: \(error.localizedDescription)")
+            inputNode.removeTap(onBus: 0)
+            recognitionRequest = nil
+            return false
+        }
+        
+        startRecognitionTask()
+        isRestarting = false
+        vcpLog("Recognition pipeline started successfully")
+        return true
+    }
+    
+    private func configureAudioSession() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord,
+                                mode: .default,
+                                options: [.allowBluetooth, .defaultToSpeaker, .allowBluetoothA2DP, .mixWithOthers])
+        try session.setActive(true, options: .notifyOthersOnDeactivation)
+        vcpLog("Audio session configured and activated")
     }
     
     // MARK: - Recognition Task
     
     private func startRecognitionTask() {
-        vcpLog("startRecognitionTask called")
-        recognitionTask?.cancel()
-        vcpLog("Cancelled existing recognition task (if any)")
-        recognitionTask = nil
-        isRestarting = false
-        hasSentResult = false
-        
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        recognitionRequest = request
+        guard let request = recognitionRequest else {
+            vcpLog("startRecognitionTask: no recognitionRequest, skipping")
+            return
+        }
         
         recognitionTask = speechRecognizer?.recognitionTask(with: request) { [weak self] taskResult, error in
             guard let self = self else { return }
@@ -315,60 +446,55 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                     let text = taskResult.bestTranscription.formattedString
                     if !text.isEmpty {
                         self.speechBuffer = text
-                        vcpLog("Partial result received: '\(text)'")
                         self.sendEvent(type: "partialResult", text: text)
                         self.resetDebounceTimer()
                     }
                 }
                 
-                if error != nil {
-                    if let error = error {
-                        let nsError = error as NSError
-                        let silenced: Set<Int> = [216, 209, 301, 1107, 1110]
-                        if !silenced.contains(nsError.code) {
-                            vcpLog("Recognition error occurred: \(error.localizedDescription) (code: \(nsError.code))")
-                            self.sendEvent(type: "error",
-                                           errorMessage: error.localizedDescription,
-                                           errorCode: "\(nsError.code)")
-                        } else {
-                            vcpLog("Recognition error silenced with code: \(nsError.code)")
-                        }
+                if let error = error {
+                    let nsError = error as NSError
+                    let silenced: Set<Int> = [216, 209, 301, 1107, 1110]
+                    if !silenced.contains(nsError.code) {
+                        vcpLog("Recognition error: \(error.localizedDescription) (code: \(nsError.code))")
+                        self.sendEvent(type: "error",
+                                       errorMessage: error.localizedDescription,
+                                       errorCode: "\(nsError.code)")
                     }
                     if self.isCurrentlyListening && !self.isPaused && !self.isRestarting {
-                        vcpLog("Scheduling recognition restart due to error")
                         self.scheduleRecognitionRestart()
                     }
                 }
             }
         }
-        vcpLog("Recognition task started")
+        
+        if recognitionTask == nil {
+            vcpLog("⚠️ recognitionTask is nil after creation, will retry in 1s")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self = self, self.isCurrentlyListening, !self.isPaused else { return }
+                self.rebuildPipeline()
+            }
+        }
     }
     
     private func scheduleRecognitionRestart() {
-        vcpLog("scheduleRecognitionRestart called")
-        guard !isRestarting else {
-            vcpLog("scheduleRecognitionRestart aborted: already restarting")
-            return
-        }
+        guard !isRestarting else { return }
         isRestarting = true
+        recognitionTask?.cancel()
         recognitionRequest = nil
         recognitionTask = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self = self else { return }
             guard self.isCurrentlyListening, !self.isPaused else {
-                vcpLog("scheduleRecognitionRestart aborted: Not listening or paused")
                 self.isRestarting = false
                 return
             }
-            vcpLog("Restarting recognition task")
-            self.startRecognitionTask()
+            _ = self.rebuildPipeline()
         }
     }
     
     // MARK: - Debounce
     
     private func resetDebounceTimer() {
-        vcpLog("resetDebounceTimer called - invalidating previous timer if exists")
         debounceTimer?.invalidate()
         debounceTimer = Timer.scheduledTimer(
             withTimeInterval: debounceDuration,
@@ -377,63 +503,20 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             guard let self = self else { return }
             let text = self.speechBuffer.trimmingCharacters(in: .whitespaces)
             guard !text.isEmpty else { return }
-            self.sendEvent(type: "result", text: text)
-            self.speechBuffer = ""
-            speechBuffer = ""
-            self.isRestarting = true
-            self.recognitionTask?.cancel()
-            self.recognitionRequest = nil
-            self.recognitionTask?.cancel()
-            self.recognitionTask=nil;
             self.flushSession()
-            //            if self.isCurrentlyListening && !self.isPaused {
-            //                self.isRestarting = true
-            //                self.recognitionTask?.cancel()
-            //                self.recognitionRequest = nil
-            //                self.recognitionTask = nil
-            //                self.scheduleRecognitionRestart()
-            //            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                [weak self] in
+                guard let self = self else { return }
+                self.sendEvent(type: "result", text: text)
+                self.speechBuffer = ""
+            }
         }
-    }
-    
-    private func firePendingDebounce() {
-        guard debounceTimer != nil else {
-            vcpLog("firePendingDebounce called but no debounce timer active")
-            return
-        }
-        vcpLog("Firing pending debounce timer immediately")
-        debounceTimer?.fire()
-        debounceTimer?.invalidate()
-        debounceTimer = nil
-        vcpLog("Debounce timer fired and invalidated")
     }
     
     // MARK: - Session Flush
     
-    private func startSessionFlushTimer() {
-        vcpLog("startSessionFlushTimer called")
-        sessionFlushTimer?.invalidate()
-        sessionFlushTimer = Timer.scheduledTimer(
-            withTimeInterval: sessionFlushInterval,
-            repeats: true
-        ) { [weak self] _ in
-            guard let self = self,
-                  self.isRestarting
-            else {
-                vcpLog("Session flush timer triggered but isRestarting is false, skipping flush")
-                return
-            }
-            vcpLog("Session flush timer triggered, flushing session")
-            self.flushSession()
-        }
-        vcpLog("Session flush timer started with interval: \(sessionFlushInterval)")
-    }
-    
     private func flushSession() {
         vcpLog("flushSession called")
-//        firePendingDebounce()
-      
-        
         isRestarting = true
         recognitionTask?.cancel()
         recognitionRequest = nil
@@ -442,21 +525,19 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self = self else { return }
             guard self.isCurrentlyListening, !self.isPaused else {
-                vcpLog("flushSession aborted: Not listening or paused")
                 self.isRestarting = false
                 return
             }
-            vcpLog("Restarting recognition task after session flush")
-            self.startRecognitionTask()
+            _ = self.rebuildPipeline()
             self.sendEvent(type: "sessionFlushed")
-            vcpLog("Session flushed event sent")
         }
     }
     
     // MARK: - Teardown
     
     private func tearDown() {
-        vcpLog("tearDown called, cleaning up resources")
+        vcpLog("tearDown called")
+        removeInterruptionObserver()
         debounceTimer?.invalidate()
         debounceTimer = nil
         sessionFlushTimer?.invalidate()
@@ -468,18 +549,17 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         
         audioEngine.inputNode.removeTap(onBus: 0)
         if audioEngine.isRunning {
-            vcpLog("Stopping audio engine during teardown")
             audioEngine.stop()
         }
+        audioEngine.reset()
         
         speechBuffer = ""
         
         do {
             try AVAudioSession.sharedInstance()
                 .setActive(false, options: .notifyOthersOnDeactivation)
-            vcpLog("Audio session deactivated during teardown")
         } catch {
-            vcpLog("Error deactivating audio session during teardown: \(error.localizedDescription)")
+            vcpLog("Error deactivating audio session: \(error.localizedDescription)")
         }
     }
     
@@ -499,4 +579,3 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         }
     }
 }
-

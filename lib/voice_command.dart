@@ -54,6 +54,13 @@ class VoiceCommand {
     return _platform.isListening();
   }
 
+  /// Re-apply the audio session and restart the recognition pipeline.
+  /// Call after another component (e.g. navigation SDK) has reconfigured
+  /// the shared AVAudioSession so that voice recognition resumes.
+  Future<void> reapplyAudioSession() {
+    return _platform.reapplyAudioSession();
+  }
+
   /// Raw event stream.
   Stream<VoiceCommandEvent> get onEvent => _platform.eventStream;
 
