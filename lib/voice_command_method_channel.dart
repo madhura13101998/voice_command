@@ -72,4 +72,28 @@ class MethodChannelVoiceCommand extends VoiceCommandPlatform {
   Future<void> reapplyAudioSession() async {
     await methodChannel.invokeMethod('reapplyAudioSession');
   }
+
+  @override
+  Future<void> startWakeWordDetection({
+    String? modelPath,
+    double threshold = 0.5,
+    int inputSize = 1280,
+  }) async {
+    await methodChannel.invokeMethod('startWakeWordDetection', {
+      'modelPath': modelPath,
+      'threshold': threshold,
+      'inputSize': inputSize,
+    });
+  }
+
+  @override
+  Future<void> stopWakeWordDetection() async {
+    await methodChannel.invokeMethod('stopWakeWordDetection');
+  }
+
+  @override
+  Future<bool> isWakeWordActive() async {
+    final result = await methodChannel.invokeMethod<bool>('isWakeWordActive');
+    return result ?? false;
+  }
 }

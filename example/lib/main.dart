@@ -14,7 +14,9 @@ class _MyAppState extends State<MyApp> {
   final _vc = VoiceCommand();
   bool _listening = false;
   bool _paused = false;
-  bool _permitted = false;
+  bool _permitted = true;
+  bool _wakeWordActive = false;
+  int _wakeWordDetectedCount = 0;
   String _partial = '';
   String _lastResult = '';
   final List<String> _log = [];
@@ -24,6 +26,7 @@ class _MyAppState extends State<MyApp> {
   void initState() {
     super.initState();
     _sub = _vc.onEvent.listen(_onEvent);
+    _stopWakeWord();
   }
 
   void _onEvent(VoiceCommandEvent e) {
@@ -47,6 +50,12 @@ class _MyAppState extends State<MyApp> {
           _paused = true;
         case VoiceCommandEventType.listeningResumed:
           _paused = false;
+        case VoiceCommandEventType.wakeWordDetected:
+          _wakeWordDetectedCount++;
+        case VoiceCommandEventType.wakeWordListeningStarted:
+          _wakeWordActive = true;
+        case VoiceCommandEventType.wakeWordListeningStopped:
+          _wakeWordActive = false;
         default:
           break;
       }
@@ -85,10 +94,19 @@ class _MyAppState extends State<MyApp> {
     });
   }
 
+  Future<void> _startWakeWord() async {
+    await _vc.startWakeWordDetection(threshold: 0.5);
+  }
+
+  Future<void> _stopWakeWord() async {
+    await _vc.stopWakeWordDetection();
+  }
+
   @override
   void dispose() {
     _sub?.cancel();
     _vc.stopListening();
+    _vc.stopWakeWordDetection();
     super.dispose();
   }
 
@@ -119,6 +137,71 @@ class _MyAppState extends State<MyApp> {
                   child: const Text('Grant Microphone & Speech Permission'),
                 ),
               if (_permitted) ...[
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Wake word',
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.record_voice_over,
+                              size: 16,
+                              color: _wakeWordActive
+                                  ? Colors.green
+                                  : Colors.grey,
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              _wakeWordActive
+                                  ? 'Listening for wake word…'
+                                  : 'Stopped',
+                              style: Theme.of(context).textTheme.bodyMedium,
+                            ),
+                            if (_wakeWordDetectedCount > 0) ...[
+                              const SizedBox(width: 12),
+                              Text(
+                                'Detected: $_wakeWordDetectedCount',
+                                style: Theme.of(context).textTheme.bodySmall
+                                    ?.copyWith(color: cs.primary),
+                              ),
+                            ],
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            if (!_wakeWordActive)
+                              FilledButton.tonalIcon(
+                                onPressed: _startWakeWord,
+                                icon: const Icon(Icons.hearing),
+                                label: const Text('Start wake word'),
+                              ),
+                            if (_wakeWordActive)
+                              FilledButton.icon(
+                                onPressed: _stopWakeWord,
+                                icon: const Icon(Icons.hearing_disabled),
+                                label: const Text('Stop wake word'),
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: cs.error,
+                                  foregroundColor: cs.onError,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
                 Card(
                   child: Padding(
                     padding: const EdgeInsets.all(16),

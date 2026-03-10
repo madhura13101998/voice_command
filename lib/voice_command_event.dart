@@ -7,6 +7,9 @@ enum VoiceCommandEventType {
   result,
   error,
   sessionFlushed,
+  wakeWordDetected,
+  wakeWordListeningStarted,
+  wakeWordListeningStopped,
 }
 
 class VoiceCommandEvent {
@@ -53,6 +56,12 @@ class VoiceCommandEvent {
         return '[PAUSED]';
       case VoiceCommandEventType.listeningResumed:
         return '[RESUMED]';
+      case VoiceCommandEventType.wakeWordDetected:
+        return '[WAKE WORD DETECTED]';
+      case VoiceCommandEventType.wakeWordListeningStarted:
+        return '[WAKE WORD STARTED]';
+      case VoiceCommandEventType.wakeWordListeningStopped:
+        return '[WAKE WORD STOPPED]';
     }
   }
 }

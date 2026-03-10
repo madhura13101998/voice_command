@@ -53,6 +53,24 @@ abstract class VoiceCommandPlatform extends PlatformInterface {
     throw UnimplementedError('reapplyAudioSession() has not been implemented.');
   }
 
+  Future<void> startWakeWordDetection({
+    String? modelPath,
+    double threshold = 0.5,
+    int inputSize = 1280,
+  }) {
+    throw UnimplementedError(
+        'startWakeWordDetection() has not been implemented.');
+  }
+
+  Future<void> stopWakeWordDetection() {
+    throw UnimplementedError(
+        'stopWakeWordDetection() has not been implemented.');
+  }
+
+  Future<bool> isWakeWordActive() {
+    throw UnimplementedError('isWakeWordActive() has not been implemented.');
+  }
+
   Stream<VoiceCommandEvent> get eventStream {
     throw UnimplementedError('eventStream has not been implemented.');
   }

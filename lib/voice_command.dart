@@ -61,6 +61,38 @@ class VoiceCommand {
     return _platform.reapplyAudioSession();
   }
 
+  /// Start on-device wake-word detection using a TFLite model.
+  ///
+  /// Uses a lightweight audio session (`.playAndRecord` with `.default` mode)
+  /// so that music/audio playback can continue uninterrupted.
+  ///
+  /// [modelPath] – Flutter asset key or absolute path to the `.tflite` model.
+  ///   If null, the plugin searches its resource bundle and the main bundle.
+  /// [threshold] – Confidence threshold for triggering (0.0–1.0).
+  /// [inputSize] – Number of 16 kHz samples per inference window (auto-detected
+  ///   from the model if possible).
+  Future<void> startWakeWordDetection({
+    String? modelPath,
+    double threshold = 0.5,
+    int inputSize = 1280,
+  }) {
+    return _platform.startWakeWordDetection(
+      modelPath: modelPath,
+      threshold: threshold,
+      inputSize: inputSize,
+    );
+  }
+
+  /// Stop wake-word detection and release the audio pipeline.
+  Future<void> stopWakeWordDetection() {
+    return _platform.stopWakeWordDetection();
+  }
+
+  /// Whether wake-word detection is currently running.
+  Future<bool> get isWakeWordActive {
+    return _platform.isWakeWordActive();
+  }
+
   /// Raw event stream.
   Stream<VoiceCommandEvent> get onEvent => _platform.eventStream;
 
@@ -78,4 +110,8 @@ class VoiceCommand {
   Stream<String> get onError => onEvent
       .where((e) => e.type == VoiceCommandEventType.error)
       .map((e) => e.errorMessage ?? 'Unknown error');
+
+  /// Fires when the on-device wake-word model detects the trigger phrase.
+  Stream<VoiceCommandEvent> get onWakeWordDetected => onEvent
+      .where((e) => e.type == VoiceCommandEventType.wakeWordDetected);
 }
