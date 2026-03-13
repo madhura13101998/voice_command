@@ -287,9 +287,10 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         vcpLog("startWakeWordDetection called (3-stage pipeline)")
 
         guard !isWakeWordActive else {
-            result(FlutterError(
-                code: "ALREADY_ACTIVE",
-                message: "Wake word detection already active", details: nil))
+            result(
+                FlutterError(
+                    code: "ALREADY_ACTIVE",
+                    message: "Wake word detection already active", details: nil))
             return
         }
 
@@ -302,21 +303,30 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         }
 
         guard let melPath = resolveModelPath(name: "melspectrogram") else {
-            result(FlutterError(code: "MODEL_ERROR",
-                message: "melspectrogram.tflite not found. Add it to the plugin Resources directory.",
-                details: nil))
+            result(
+                FlutterError(
+                    code: "MODEL_ERROR",
+                    message:
+                        "melspectrogram.tflite not found. Add it to the plugin Resources directory.",
+                    details: nil))
             return
         }
         guard let embPath = resolveModelPath(name: "embedding_model") else {
-            result(FlutterError(code: "MODEL_ERROR",
-                message: "embedding_model.tflite not found. Add it to the plugin Resources directory.",
-                details: nil))
+            result(
+                FlutterError(
+                    code: "MODEL_ERROR",
+                    message:
+                        "embedding_model.tflite not found. Add it to the plugin Resources directory.",
+                    details: nil))
             return
         }
         guard let clsPath = resolveModelPath(name: "wake_word", explicitPath: modelPath) else {
-            result(FlutterError(code: "MODEL_ERROR",
-                message: "wake_word.tflite not found. Place it in the plugin Resources directory or pass modelPath.",
-                details: nil))
+            result(
+                FlutterError(
+                    code: "MODEL_ERROR",
+                    message:
+                        "wake_word.tflite not found. Place it in the plugin Resources directory or pass modelPath.",
+                    details: nil))
             return
         }
 
@@ -334,9 +344,11 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             wakeWordDetector = detector
         } catch {
             vcpLog("Failed to create WakeWordDetector: \(error.localizedDescription)")
-            result(FlutterError(code: "MODEL_ERROR",
-                message: "Failed to initialize wake word models: \(error.localizedDescription)",
-                details: nil))
+            result(
+                FlutterError(
+                    code: "MODEL_ERROR",
+                    message: "Failed to initialize wake word models: \(error.localizedDescription)",
+                    details: nil))
             return
         }
 
@@ -347,15 +359,18 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             result(nil)
         } else {
             wakeWordDetector = nil
-            result(FlutterError(
-                code: "AUDIO_ERROR",
-                message: "Failed to start wake word audio pipeline",
-                details: nil))
+            result(
+                FlutterError(
+                    code: "AUDIO_ERROR",
+                    message: "Failed to start wake word audio pipeline",
+                    details: nil))
         }
     }
 
     /// Resolve a .tflite model file from the plugin resource bundle or main bundle.
-    private func resolveModelPath(name: String, ext: String = "tflite", explicitPath: String? = nil) -> String? {
+    private func resolveModelPath(name: String, ext: String = "tflite", explicitPath: String? = nil)
+        -> String?
+    {
         if let path = explicitPath {
             let flutterKey = FlutterDartProject.lookupKey(forAsset: path)
             if let resolved = Bundle.main.path(forResource: flutterKey, ofType: nil) {
@@ -366,9 +381,11 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             }
         }
         let pluginBundle = Bundle(for: VoiceCommandPlugin.self)
-        if let resBundlePath = pluginBundle.path(forResource: "voice_command_wakeword", ofType: "bundle"),
-           let resBundle = Bundle(path: resBundlePath),
-           let path = resBundle.path(forResource: name, ofType: ext) {
+        if let resBundlePath = pluginBundle.path(
+            forResource: "voice_command_wakeword", ofType: "bundle"),
+            let resBundle = Bundle(path: resBundlePath),
+            let path = resBundle.path(forResource: name, ofType: ext)
+        {
             return path
         }
         return Bundle.main.path(forResource: name, ofType: ext)
@@ -400,14 +417,19 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
     /// Configures the audio session for wake-word-only mode.
     /// Uses `.default` mode instead of `.voiceChat` so playback is not interrupted.
+    /// Sets preferred sample rate to 16kHz so tap format matches hardware (avoids format mismatch crash on simulator/some devices).
     private func configureAudioSessionForWakeWord() throws {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(
             .playAndRecord,
             mode: .default,
-            options: [.defaultToSpeaker, .allowBluetoothA2DP, .duckOthers, .mixWithOthers])
+            options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP, .mixWithOthers])
+        try session.setPreferredSampleRate(16000)
+        if #available(iOS 18.2, *) {
+            try session.setPrefersEchoCancelledInput(true)
+        }
         try session.setActive(true, options: .notifyOthersOnDeactivation)
-        vcpLog("Audio session configured for wake-word (playAndRecord, default mode)")
+        vcpLog("Audio session configured for wake-word (playAndRecord, default mode, preferred 16kHz)")
     }
 
     private func startWakeWordPipeline() -> Bool {
@@ -421,18 +443,27 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         let inputNode = audioEngine.inputNode
         inputNode.removeTap(onBus: 0)
 
-        let hardwareFormat = inputNode.outputFormat(forBus: 0)
+        // Use inputFormat (actual hardware format) for the tap so it always matches the input node.
+        // outputFormat(forBus: 0) can differ from actual HW on simulator/some devices and cause "Input HW format and tap format not matching" crash.
+        var hardwareFormat = inputNode.inputFormat(forBus: 0)
+        if hardwareFormat.sampleRate == 0 || hardwareFormat.channelCount == 0 {
+            hardwareFormat = inputNode.outputFormat(forBus: 0)
+        }
         guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {
-            vcpLog("Invalid hardware format for wake word: \(hardwareFormat.sampleRate)Hz, \(hardwareFormat.channelCount)ch")
+            vcpLog(
+                "Invalid hardware format for wake word: \(hardwareFormat.sampleRate)Hz, \(hardwareFormat.channelCount)ch"
+            )
             return false
         }
 
-        guard let targetFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: 16000,
-            channels: 1,
-            interleaved: false
-        ) else {
+        guard
+            let targetFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: 16000,
+                channels: 1,
+                interleaved: false
+            )
+        else {
             vcpLog("Failed to create 16kHz target format")
             return false
         }
@@ -444,7 +475,9 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             return false
         }
 
-        vcpLog("Wake word tap: \(hardwareFormat.sampleRate)Hz \(hardwareFormat.channelCount)ch -> 16000Hz 1ch")
+        vcpLog(
+            "Wake word tap: \(hardwareFormat.sampleRate)Hz \(hardwareFormat.channelCount)ch -> 16000Hz 1ch"
+        )
 
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: hardwareFormat) {
             [weak self] buffer, _ in
@@ -486,15 +519,17 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     /// Resample hardware audio to 16 kHz mono Float32, then forward to the detector.
     private func processWakeWordBuffer(_ buffer: AVAudioPCMBuffer) {
         guard let converter = resampleConverter,
-              let outputFormat = resampleOutputFormat else { return }
+            let outputFormat = resampleOutputFormat
+        else { return }
 
         let ratio = outputFormat.sampleRate / buffer.format.sampleRate
         let outputFrameCount = AVAudioFrameCount(ceil(Double(buffer.frameLength) * ratio))
         guard outputFrameCount > 0,
-              let outputBuffer = AVAudioPCMBuffer(
+            let outputBuffer = AVAudioPCMBuffer(
                 pcmFormat: outputFormat,
                 frameCapacity: outputFrameCount
-              ) else { return }
+            )
+        else { return }
 
         var error: NSError?
         var inputConsumed = false
@@ -509,12 +544,14 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         }
 
         guard status != .error,
-              let channelData = outputBuffer.floatChannelData else { return }
+            let channelData = outputBuffer.floatChannelData
+        else { return }
 
-        let samples = Array(UnsafeBufferPointer(
-            start: channelData[0],
-            count: Int(outputBuffer.frameLength)
-        ))
+        let samples = Array(
+            UnsafeBufferPointer(
+                start: channelData[0],
+                count: Int(outputBuffer.frameLength)
+            ))
 
         wakeWordDetector?.processAudio(samples)
     }
@@ -734,8 +771,9 @@ public class VoiceCommandPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         try session.setCategory(
             .playAndRecord,
             mode: .voiceChat,
-            options: [.allowBluetoothHFP, .defaultToSpeaker, .allowBluetoothA2DP, .duckOthers])
+            options: [.allowBluetoothHFP, .defaultToSpeaker, .allowBluetoothA2DP])
         try session.setActive(true, options: .notifyOthersOnDeactivation)
+
         vcpLog("Audio session configured and activated")
     }
 
